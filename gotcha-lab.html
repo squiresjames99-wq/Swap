@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Gotcha Lab" />
+  <meta name="theme-color" content="#0b0c10" />
+  <title>Gotcha Lab</title>
+  <style>
+    :root {
+      --bg: #0b0c10; --panel: #171a21; --ink: #efece7; --muted: #9aa0a8;
+      --gold: #e8c547; --danger: #ff6b6b; --ok: #6ee7b7; --line: #2c3140;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink);
+      font: 16px/1.4 Georgia, "Iowan Old Style", serif;
+      min-height: 100%; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 1.6rem; margin: 0 0 .3rem; }
+    h2, h3 { margin: .2rem 0 .6rem; }
+    .muted { color: var(--muted); font-size: .92rem; }
+    .wm { letter-spacing: .08em; text-transform: uppercase; font-size: .68rem; color: var(--muted); }
+    .panel { background: var(--panel); border: 1px solid var(--line); padding: 14px; margin: 12px 0; border-radius: 10px; }
+    .warn { background: #2a1a12; border: 1px solid #6b3a1f; padding: 12px; border-radius: 10px; }
+    button, .btn {
+      display: inline-block; width: 100%; margin: 6px 0; padding: 14px 12px;
+      border: 0; border-radius: 10px; background: var(--gold); color: #111;
+      font: 700 16px/1 Georgia, serif; cursor: pointer; text-align: center; text-decoration: none;
+    }
+    button.ghost, .ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    button:disabled { opacity: .5; }
+    label { display: block; margin: 10px 0 6px; color: var(--muted); }
+    input[type=text], input[type=number], textarea {
+      width: 100%; background: #0e1014; color: var(--ink); border: 1px solid var(--line);
+      padding: 12px; border-radius: 8px; font-size: 16px;
+    }
+    input[type=file] { width: 100%; margin: 8px 0; }
+    input[type=range] { width: 100%; }
+    .row { display: flex; gap: 8px; }
+    .row button { flex: 1; }
+    .preview { width: 100%; max-height: 280px; object-fit: contain; background: #000; border-radius: 8px; }
+    .faces { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+    .faces button { width: auto; padding: 6px; margin: 0; }
+    .faces img { width: 72px; height: 72px; display: block; border-radius: 8px; }
+    .err { color: var(--danger); } .ok { color: var(--ok); }
+    nav { display: flex; gap: 8px; }
+    nav button { padding: 10px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="app"></div>
+  <script type="module">
+const WATERMARK = "gotcha Ai generated";
+const PHRASE = "I understand this output is synthetic media labeled gotcha Ai generated";
+const MINOR = [
+  /\b(child|children|kid|kids|toddler|infant|baby|babies)\b/i,
+  /\b(minor|underage|under[- ]age|under[- ]18|u18)\b/i,
+  /\b(teen(?!ager adult)|teenage(?! adult)|teenie|tween)\b/i,
+  /\b(young|little)\s+(boy|girl|child)\b/i,
+  /\b(pre[- ]?teen|middle[- ]school|elementary)\b/i,
+  /\b(1[0-7])[- ]year/i,
+  /\bloli\b|\bshota\b|\bpedoph/i,
+];
+const NONCONSENT = [
+  /\bwithout (their|her|his|the person's) (consent|knowledge|permission)\b/i,
+  /\bthey don'?t know\b/i,
+  /\bnon[- ]consensual\b/i,
+  /\brevenge porn\b/i,
+  /\bsecretly (film|record|swap)\b/i,
+];
+
+const state = {
+  view: "gate",
+  subject: JSON.parse(localStorage.getItem("gotcha.subject") || "null"),
+  consent: JSON.parse(localStorage.getItem("gotcha.consent") || "null"),
+  source: { url: null, real: false, box: false },
+  dest: { url: null, real: false, box: false },
+  adult: true,
+  blend: 0.85,
+  prompt: "Adult subject turns toward camera, soft light, subtle motion",
+  busy: false,
+  err: "",
+  msg: "",
+  result: null,
+  sandbox: [],
+  sig: "",
+  typed: "",
+  purpose: "phone lab, consented likeness",
+};
+
+if (state.subject?.age_verified) state.view = "studio";
+
+function save() {
+  localStorage.setItem("gotcha.subject", JSON.stringify(state.subject));
+  localStorage.setItem("gotcha.consent", JSON.stringify(state.consent));
+}
+
+function checkPrompt(text) {
+  if (MINOR.some((r) => r.test(text || ""))) return { ok: false, reason: "minors are not allowed" };
+  if (NONCONSENT.some((r) => r.test(text || ""))) return { ok: false, reason: "non-consensual phrasing is blocked" };
+  return { ok: true };
+}
+
+function gateJob() {
+  const p = checkPrompt(state.prompt);
+  if (!p.ok) return p;
+  const real = !!(state.source.real || state.dest.real);
+  if (real && !(state.source.real ? state.source.box : true && state.dest.real ? state.dest.box : true)) {
+    return { ok: false, reason: "check the consent box next to a real photo" };
+  }
+  if (real && state.source.real && !state.source.box) return { ok: false, reason: "check consent on the source photo" };
+  if (real && state.dest.real && !state.dest.box) return { ok: false, reason: "check consent on the destination photo" };
+  if (real && state.consent?.status !== "signed") return { ok: false, reason: "sign consent first (Consent tab)" };
+  return { ok: true };
+}
+
+function stamp(canvas) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.save();
+  ctx.font = `${Math.max(14, Math.floor(w / 24))}px Georgia,serif`;
+  const pad = 10, text = WATERMARK, tw = ctx.measureText(text).width, th = 22;
+  ctx.fillStyle = "rgba(0,0,0,.65)";
+  ctx.fillRect(w - tw - pad * 2, h - th - pad * 2, tw + pad * 2, th + pad * 2);
+  ctx.fillStyle = "rgba(255,255,255,.94)";
+  ctx.fillText(text, w - tw - pad, h - pad - 4);
+  ctx.restore();
+}
+
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = () => rej(new Error("could not read image"));
+    im.src = src;
+  });
+}
+
+function toCanvas(img, max = 720) {
+  const s = Math.min(1, max / Math.max(img.width, img.height));
+  const c = document.createElement("canvas");
+  c.width = Math.max(2, Math.round(img.width * s));
+  c.height = Math.max(2, Math.round(img.height * s));
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return c;
+}
+
+function hash(s) { let h = 2166136261; for (const ch of s) h = Math.imul(h ^ ch.charCodeAt(0), 16777619); return h >>> 0; }
+function rng(seed) { let x = seed || 1; return () => { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; return ((x >>> 0) % 1000) / 1000; }; }
+
+function sandboxFace(label) {
+  const rnd = rng(hash(label)), size = 360;
+  const c = document.createElement("canvas"); c.width = size; c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = `rgb(${40+rnd()*40},${40+rnd()*40},${50+rnd()*40})`;
+  ctx.fillRect(0,0,size,size);
+  const cx = size/2, cy = size*0.48;
+  ctx.fillStyle = `rgb(${150+rnd()*70},${120+rnd()*60},${100+rnd()*50})`;
+  ctx.beginPath(); ctx.ellipse(cx,cy,size*0.28,size*0.36,0,0,Math.PI*2); ctx.fill();
+  for (const dx of [-size*0.09, size*0.09]) {
+    ctx.fillStyle = "#f2f2f2"; ctx.beginPath(); ctx.ellipse(cx+dx, cy-size*0.06, 18, 12, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#111"; ctx.beginPath(); ctx.arc(cx+dx, cy-size*0.06, 6, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.strokeStyle = "#3a2218"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.ellipse(cx, cy+42, 22, 12, 0, .2, Math.PI-.2); ctx.stroke();
+  ctx.fillStyle = `rgb(${rnd()*70},${rnd()*40},${rnd()*30})`;
+  ctx.beginPath(); ctx.ellipse(cx, cy-size*0.22, size*0.3, size*0.16, 0, Math.PI, 0); ctx.fill();
+  stamp(c);
+  return c.toDataURL("image/jpeg", 0.9);
+}
+
+state.sandbox = ["north","east","south","west","studio","gold"].map((n) => {
+  const label = "sandbox-" + n;
+  return { label, url: sandboxFace(label) };
+});
+
+let landmarker = null;
+async function getFace(canvas) {
+  try {
+    if (!landmarker) {
+      const vision = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm");
+      const files = await vision.FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+      landmarker = await vision.FaceLandmarker.createFromOptions(files, {
+        baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" },
+        runningMode: "IMAGE", numFaces: 1,
+      });
+    }
+    const res = landmarker.detect(canvas);
+    const pts = res?.faceLandmarks?.[0];
+    if (pts?.length) {
+      let minX=1,minY=1,maxX=0,maxY=0;
+      for (const p of pts) { minX=Math.min(minX,p.x); minY=Math.min(minY,p.y); maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y); }
+      const w = canvas.width, h = canvas.height;
+      const x = Math.max(0,(minX-0.15)*w), y = Math.max(0,(minY-0.18)*h);
+      return { x, y, w: Math.min(w, (maxX+0.15)*w)-x, h: Math.min(h,(maxY+0.2)*h)-y };
+    }
+  } catch (_) { /* iPhone will still blend the center */ }
+  return { x: canvas.width*0.29, y: canvas.height*0.18, w: canvas.width*0.42, h: canvas.height*0.52 };
+}
+
+async function swapFaces() {
+  const srcImg = await loadImg(state.source.url);
+  const dstImg = await loadImg(state.dest.url);
+  const src = toCanvas(srcImg), dst = toCanvas(dstImg);
+  const sf = await getFace(src), df = await getFace(dst);
+  const crop = document.createElement("canvas");
+  crop.width = Math.max(8, sf.w|0); crop.height = Math.max(8, sf.h|0);
+  crop.getContext("2d").drawImage(src, sf.x, sf.y, sf.w, sf.h, 0, 0, crop.width, crop.height);
+  const out = document.createElement("canvas");
+  out.width = dst.width; out.height = dst.height;
+  const ctx = out.getContext("2d");
+  ctx.drawImage(dst, 0, 0);
+  ctx.save();
+  ctx.globalAlpha = Number(state.blend);
+  ctx.beginPath();
+  ctx.ellipse(df.x+df.w/2, df.y+df.h/2, df.w*0.48, df.h*0.56, 0, 0, Math.PI*2);
+  ctx.clip();
+  ctx.drawImage(crop, df.x, df.y, df.w, df.h);
+  ctx.restore();
+  stamp(out);
+  return out.toDataURL("image/jpeg", 0.92);
+}
+
+async function stillToVideo() {
+  const img = await loadImg(state.dest.url || state.source.url);
+  const base = toCanvas(img, 540);
+  const w = base.width - base.width%2, h = base.height - base.height%2;
+  const frame = document.createElement("canvas"); frame.width = w; frame.height = h;
+  const fps = 10, n = 24;
+  const p = (state.prompt||"").toLowerCase();
+  const zoom = /(closer|walk|toward)/.test(p) ? 0.18 : 0.1;
+  if (typeof MediaRecorder === "undefined") {
+    const ctx = frame.getContext("2d");
+    ctx.drawImage(base, 0, 0, w, h); stamp(frame);
+    return { kind: "image", url: frame.toDataURL("image/jpeg", 0.92), note: "this iPhone saved a still instead of video" };
+  }
+  const stream = frame.captureStream(fps);
+  const types = ["video/mp4", "video/webm;codecs=vp8", "video/webm"];
+  const mime = types.find((t) => MediaRecorder.isTypeSupported(t)) || "";
+  const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  const chunks = [];
+  rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  const done = new Promise((res) => { rec.onstop = () => res(new Blob(chunks, { type: rec.mimeType || "video/mp4" })); });
+  rec.start();
+  const ctx = frame.getContext("2d");
+  for (let i = 0; i < n; i++) {
+    const t = i / (n-1);
+    const z = 1 + zoom * t;
+    ctx.fillStyle = "#000"; ctx.fillRect(0,0,w,h);
+    ctx.save();
+    ctx.translate(w/2, h/2);
+    ctx.rotate(Math.sin(t*6.28)*0.02);
+    ctx.scale(z,z);
+    ctx.drawImage(base, -w/2, -h/2, w, h);
+    ctx.restore();
+    stamp(frame);
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  rec.stop();
+  const blob = await done;
+  if (!blob.size) {
+    stamp(frame);
+    return { kind: "image", url: frame.toDataURL("image/jpeg", 0.92), note: "recorder produced an empty file; saved a still" };
+  }
+  return { kind: "video", url: URL.createObjectURL(blob) };
+}
+
+function pickSandbox(item) {
+  state.source = { url: item.url, real: false, box: true };
+  if (!state.dest.url) state.dest = { url: item.url, real: false, box: true };
+  render();
+}
+
+function onFile(which, file, fromCamera) {
+  const url = URL.createObjectURL(file);
+  state[which] = { url, real: true, box: state[which].box, camera: !!fromCamera };
+  render();
+}
+
+async function shareResult() {
+  if (!state.result) return;
+  try {
+    const res = await fetch(state.result.url);
+    const blob = await res.blob();
+    const ext = state.result.kind === "video" ? "mp4" : "jpg";
+    const file = new File([blob], `gotcha.${ext}`, { type: blob.type || (ext === "mp4" ? "video/mp4" : "image/jpeg") });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], text: WATERMARK });
+      return;
+    }
+  } catch (_) {}
+  window.open(state.result.url, "_blank");
+}
+
+async function runSwap() {
+  const g = gateJob();
+  if (!g.ok) { state.err = g.reason; render(); return; }
+  if (!state.source.url || !state.dest.url) { state.err = "Need a source face and a destination still."; render(); return; }
+  state.busy = true; state.err = ""; render();
+  try { state.result = { kind: "image", url: await swapFaces() }; }
+  catch (e) { state.err = e.message || String(e); }
+  state.busy = false; render();
+}
+
+async function runVideo() {
+  const g = gateJob();
+  if (!g.ok) { state.err = g.reason; render(); return; }
+  if (!state.dest.url && !state.source.url) { state.err = "Need a still."; render(); return; }
+  state.busy = true; state.err = ""; render();
+  try { state.result = await stillToVideo(); }
+  catch (e) { state.err = e.message || String(e); }
+  state.busy = false; render();
+}
+
+function enter(age, name, ack) {
+  if (!ack) { state.err = "Tick the ethics box."; render(); return; }
+  if (Number(age) < 18) { state.err = "18+ only."; render(); return; }
+  state.subject = { subject_id: crypto.randomUUID(), age_verified: true, attested_age: Number(age), display_name: name || "operator" };
+  state.view = "studio"; state.err = ""; save(); render();
+}
+
+function startConsent() {
+  state.consent = {
+    consent_id: crypto.randomUUID(), status: "started", purpose: state.purpose,
+    adult_content_acknowledged: state.adult, id_verified: false, liveness_passed: false,
+  };
+  state.msg = "Session opened. Tap ID stub, liveness stub, then sign.";
+  save(); render();
+}
+
+function signConsent() {
+  if (!state.consent) { state.err = "Start a session first."; render(); return; }
+  if (!state.consent.id_verified || !state.consent.liveness_passed) { state.err = "Do both stubs first."; render(); return; }
+  if (!state.typed.toLowerCase().includes(PHRASE.toLowerCase())) { state.err = "Type the agreement phrase."; render(); return; }
+  if (!state.sig.trim()) { state.err = "Put a name on it."; render(); return; }
+  state.consent = { ...state.consent, status: "signed", signature_name: state.sig.trim(), signed_at: new Date().toISOString(), adult_content_acknowledged: state.adult };
+  state.msg = "Signed. Real photos and adult themes are live.";
+  state.err = ""; save(); render();
+}
+
+function render() {
+  const el = document.getElementById("app");
+  if (state.view === "gate") {
+    el.innerHTML = `
+      <p class="wm">iphone lab · 18+ · ${WATERMARK}</p>
+      <h1>Gotcha Lab</h1>
+      <div class="warn">
+        <p>This whole studio runs in Safari. Photos stay on the phone. Outputs are stamped <b>${WATERMARK}</b>.</p>
+        <ul>
+          <li>No minors.</li>
+          <li>Real faces need the checkbox + a signed consent session.</li>
+          <li>Adult / sexual / nude prompts are allowed when that box is on.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <label>Name</label>
+        <input id="name" type="text" placeholder="you" />
+        <label>Age</label>
+        <input id="age" type="number" value="18" min="0" />
+        <label><input id="ack" type="checkbox" /> I am 18+ and will not use minors or anyone who did not consent.</label>
+        ${state.err ? `<p class="err">${state.err}</p>` : ""}
+        <button id="enter">Enter lab</button>
+      </div>`;
+    el.querySelector("#enter").onclick = () =>
+      enter(el.querySelector("#age").value, el.querySelector("#name").value, el.querySelector("#ack").checked);
+    return;
+  }
+
+  const nav = `
+    <nav>
+      <button class="${state.view==="studio"?"":"ghost"}" data-v="studio">Studio</button>
+      <button class="${state.view==="consent"?"":"ghost"}" data-v="consent">Consent</button>
+    </nav>
+    <p class="wm">${WATERMARK}</p>`;
+
+  if (state.view === "consent") {
+    el.innerHTML = `${nav}
+      <h2>Consent</h2>
+      <p class="muted">Phone-only stub. Lives on this device. Needed before a real photo.</p>
+      ${state.err ? `<p class="err">${state.err}</p>` : ""}
+      ${state.msg ? `<p class="ok">${state.msg}</p>` : ""}
+      <div class="panel">
+        <label>Purpose</label>
+        <textarea id="purpose">${state.purpose}</textarea>
+        <label><input id="adultc" type="checkbox" ${state.adult?"checked":""}/> Adult / intimate / nude content of my consented likeness is allowed</label>
+        <button id="start">Start session</button>
+        <p class="muted">Status: ${state.consent?.status || "none"}</p>
+        <div class="row">
+          <button class="ghost" id="idv">ID stub</button>
+          <button class="ghost" id="liv">Liveness stub</button>
+        </div>
+        <label>Sign as</label>
+        <input id="sig" type="text" value="${state.sig}" />
+        <label>Type: ${PHRASE}</label>
+        <textarea id="typed">${state.typed}</textarea>
+        <button id="sign">Sign</button>
+      </div>`;
+    el.querySelectorAll("[data-v]").forEach((b) => b.onclick = () => { state.view = b.dataset.v; state.err=""; render(); });
+    el.querySelector("#purpose").oninput = (e) => state.purpose = e.target.value;
+    el.querySelector("#adultc").onchange = (e) => state.adult = e.target.checked;
+    el.querySelector("#sig").oninput = (e) => state.sig = e.target.value;
+    el.querySelector("#typed").oninput = (e) => state.typed = e.target.value;
+    el.querySelector("#start").onclick = startConsent;
+    el.querySelector("#idv").onclick = () => { if (state.consent) { state.consent.id_verified = true; state.consent.status = "id_verified"; save(); render(); } };
+    el.querySelector("#liv").onclick = () => { if (state.consent) { state.consent.liveness_passed = true; state.consent.status = "liveness_verified"; save(); render(); } };
+    el.querySelector("#sign").onclick = signConsent;
+    return;
+  }
+
+  el.innerHTML = `${nav}
+    <h2>Studio</h2>
+    <p class="muted">Pick a sandbox face, or grab a photo / camera. Adult themes stay on if the box is ticked.</p>
+    ${state.err ? `<p class="err">${state.err}</p>` : ""}
+    <div class="panel">
+      <h3>Sandbox</h3>
+      <div class="faces" id="faces"></div>
+    </div>
+    <div class="panel">
+      <h3>Source face</h3>
+      <label><input id="boxs" type="checkbox" ${state.source.box?"checked":""}/> I have consent for this face</label>
+      <label>Photo library</label>
+      <input id="srcfile" type="file" accept="image/*" />
+      <label>Camera</label>
+      <input id="srccam" type="file" accept="image/*" capture="user" />
+      ${state.source.url ? `<img class="preview" src="${state.source.url}" alt="source"/>` : ""}
+    </div>
+    <div class="panel">
+      <h3>Destination still</h3>
+      <label><input id="boxd" type="checkbox" ${state.dest.box?"checked":""}/> I have consent for this photo</label>
+      <label>Photo library</label>
+      <input id="dstfile" type="file" accept="image/*" />
+      <label>Camera</label>
+      <input id="dstcam" type="file" accept="image/*" capture="environment" />
+      ${state.dest.url ? `<img class="preview" src="${state.dest.url}" alt="dest"/>` : ""}
+    </div>
+    <div class="panel">
+      <label><input id="adult" type="checkbox" ${state.adult?"checked":""}/> Adult / sexual / nude content is acceptable on this job</label>
+      <label>Blend ${state.blend}</label>
+      <input id="blend" type="range" min="0.2" max="1" step="0.05" value="${state.blend}" />
+      <label>Video prompt (filthy adult wording is fine)</label>
+      <textarea id="prompt">${state.prompt}</textarea>
+      <button id="swap" ${state.busy?"disabled":""}>${state.busy?"Working…":"Face swap"}</button>
+      <button class="ghost" id="vid" ${state.busy?"disabled":""}>Still to video</button>
+    </div>
+    ${state.result ? `<div class="panel">
+      <h3>Result</h3>
+      ${state.result.note ? `<p class="muted">${state.result.note}</p>` : ""}
+      ${state.result.kind === "video"
+        ? `<video class="preview" controls playsinline src="${state.result.url}"></video>`
+        : `<img class="preview" src="${state.result.url}" alt="result"/>`}
+      <p class="wm">${WATERMARK}</p>
+      <button id="share">Share / Save to Photos</button>
+    </div>` : ""}`;
+
+  const faces = el.querySelector("#faces");
+  state.sandbox.forEach((item) => {
+    const b = document.createElement("button");
+    b.className = "ghost";
+    b.innerHTML = `<img src="${item.url}" alt="${item.label}"/><div class="muted">${item.label.replace("sandbox-","")}</div>`;
+    b.onclick = () => pickSandbox(item);
+    faces.appendChild(b);
+  });
+  el.querySelectorAll("[data-v]").forEach((b) => b.onclick = () => { state.view = b.dataset.v; state.err=""; render(); });
+  el.querySelector("#boxs").onchange = (e) => { state.source.box = e.target.checked; };
+  el.querySelector("#boxd").onchange = (e) => { state.dest.box = e.target.checked; };
+  el.querySelector("#adult").onchange = (e) => { state.adult = e.target.checked; };
+  el.querySelector("#blend").oninput = (e) => { state.blend = e.target.value; };
+  el.querySelector("#prompt").oninput = (e) => { state.prompt = e.target.value; };
+  el.querySelector("#srcfile").onchange = (e) => e.target.files[0] && onFile("source", e.target.files[0]);
+  el.querySelector("#srccam").onchange = (e) => e.target.files[0] && onFile("source", e.target.files[0], true);
+  el.querySelector("#dstfile").onchange = (e) => e.target.files[0] && onFile("dest", e.target.files[0]);
+  el.querySelector("#dstcam").onchange = (e) => e.target.files[0] && onFile("dest", e.target.files[0], true);
+  el.querySelector("#swap").onclick = runSwap;
+  el.querySelector("#vid").onclick = runVideo;
+  const sh = el.querySelector("#share");
+  if (sh) sh.onclick = shareResult;
+}
+
+render();
+  </script>
+</body>
+</html>
